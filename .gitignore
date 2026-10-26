@@ -1,0 +1,10 @@
+
+
+
+*.swp
+
+data/
+tmpdata/
+node_list.csv
+_node_list.csv
+

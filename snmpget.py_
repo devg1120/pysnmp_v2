@@ -1,0 +1,427 @@
+# -*- coding: utf-8 -*-
+
+
+from pysnmp.hlapi import *
+import schedule
+import datetime
+import time
+import pytz
+import subprocess
+import os
+import csv
+import json
+from pathlib import Path
+
+
+def get(IP, SNMPC, OID, INDEX):
+
+    iterator = getCmd(
+        SnmpEngine(),
+        CommunityData(SNMPC,),
+        #UdpTransportTarget((node_list[name], 161)),
+        UdpTransportTarget((IP, 161)),
+        ContextData(),
+        #ObjectType(ObjectIdentity('IF-MIB', 'ifNumber',0)),
+        ObjectType(ObjectIdentity('IF-MIB', OID, INDEX)),
+    )
+
+    errorIndication, errorStatus, errorIndex, varBinds = next(iterator)
+
+    if errorIndication:
+        print(errorIndication)
+
+    elif errorStatus:
+        print('%s at %s' % (errorStatus.prettyPrint(),
+                            errorIndex and varBinds[int(errorIndex) - 1][0] or '?'))
+
+    else:
+        #print(varBinds)
+        #print(str(varBinds[0][1]) )
+        return(str(varBinds[0][1]) )
+        #f.write(dt_now + "," + str(varBinds[0][1]) + "," + str(varBinds[1][1]) + '\n')
+
+    #f.close()
+
+
+from pysnmp.hlapi import *
+
+
+
+def getALLDATA(IP, SNMPC):
+    # 正しいベース OID の定義
+    oid_index  = '1.3.6.1.2.1.2.2.1.1'     # ifIndex
+    oid_descr  = '1.3.6.1.2.1.2.2.1.2'     # ifDescr
+    oid_status = '1.3.6.1.2.1.2.2.1.7'     # ifAdminStatus
+    oid_in     = '1.3.6.1.2.1.31.1.1.1.6'   # ifHCInOctets (64bit)
+    oid_out    = '1.3.6.1.2.1.31.1.1.1.10'  # ifHCOutOctets (64bit)
+    oid_speed  = '1.3.6.1.2.1.31.1.1.1.15'  # ifHighSpeed
+    oid_alias  = '1.3.6.1.2.1.31.1.1.1.18'  # ifalias
+
+    iterator = bulkCmd(
+        SnmpEngine(),
+        CommunityData(SNMPC, mpModel=1),
+        UdpTransportTarget((IP, 161)),
+        ContextData(),
+        0, 1000,
+        ObjectType(ObjectIdentity(oid_index)),
+        ObjectType(ObjectIdentity(oid_descr)),
+        ObjectType(ObjectIdentity(oid_status)),
+        ObjectType(ObjectIdentity(oid_in)),
+        ObjectType(ObjectIdentity(oid_out)),
+        ObjectType(ObjectIdentity(oid_speed)),
+        ObjectType(ObjectIdentity(oid_alias)),
+        lexicographicMode=False  # 【重要】指定した範囲外に出たら自動停止させる
+    )
+
+    interface_data = {}
+    print("--- データの受信を開始します ---")
+
+    for errorIndication, errorStatus, errorIndex, varBinds in iterator:
+        if errorIndication:
+            print(f"通信エラー: {errorIndication}")
+            break
+        elif errorStatus:
+            print(f"エラー: {errorStatus.prettyPrint()}")
+            break
+        else:
+            out_of_bounds = True
+            
+            for varBind in varBinds:
+                oid_obj, val_obj = varBind
+                oid_str = str(oid_obj)
+                val_str = val_obj.prettyPrint()
+
+                # 💡【重要】値自体にエラーメッセージが含まれている場合は、データ上書きを防ぐためスキップ
+                if "No more variables" in val_str:
+                    continue
+
+                # いずれかの OID がまだインターフェース関連の MIB の範囲内であれば続行
+                if oid_str.startswith('1.3.6.1.2.1.2.2.1') or oid_str.startswith('1.3.6.1.2.1.31.1.1.1'):
+                    out_of_bounds = False
+
+                # 該当する各項目へマッピング（インデックスごとに整理）
+                if oid_str.startswith(oid_index + '.'):  # 末尾のドットまで含めて厳密にマッチング
+                    idx = oid_str.replace(oid_index + '.', '')
+                    if idx.isdigit():  # インデックスが正しい数字である場合のみ格納
+                        interface_data.setdefault(idx, {})['index'] = val_str
+                        
+                elif oid_str.startswith(oid_descr + '.'):
+                    idx = oid_str.replace(oid_descr + '.', '')
+                    if idx.isdigit():
+                        interface_data.setdefault(idx, {})['descr'] = val_str
+                        
+                elif oid_str.startswith(oid_status + '.'):
+                    idx = oid_str.replace(oid_status + '.', '')
+                    if idx.isdigit():
+                        interface_data.setdefault(idx, {})['status'] = val_str
+                        
+                elif oid_str.startswith(oid_in + '.'):
+                    idx = oid_str.replace(oid_in + '.', '')
+                    if idx.isdigit():
+                        interface_data.setdefault(idx, {})['in'] = val_str
+                        
+                elif oid_str.startswith(oid_out + '.'):
+                    idx = oid_str.replace(oid_out + '.', '')
+                    if idx.isdigit():
+                        interface_data.setdefault(idx, {})['out'] = val_str
+                        
+                elif oid_str.startswith(oid_speed + '.'):
+                    idx = oid_str.replace(oid_speed + '.', '')
+                    if idx.isdigit():
+                        interface_data.setdefault(idx, {})['speed'] = val_str
+                        
+                elif oid_str.startswith(oid_alias + '.'):
+                    idx = oid_str.replace(oid_alias + '.', '')
+                    if idx.isdigit():
+                        interface_data.setdefault(idx, {})['alias'] = val_str
+
+            # すべてのデータが範囲外になったら終了
+            if out_of_bounds:
+                break
+    """
+    for errorIndication, errorStatus, errorIndex, varBinds in iterator:
+        if errorIndication:
+            print(f"通信エラー: {errorIndication}")
+            break
+        elif errorStatus:
+            print(f"エラー: {errorStatus.prettyPrint()}")
+            break
+        else:
+            # 💡 【安全装置】
+            # もし返ってきた OID が 4 つともすべて指定範囲（インターフェースのMIB）を
+            # 完全に通り過ぎてしまった場合は、ループをその場で強制終了します。
+            out_of_bounds = True
+            
+            for varBind in varBinds:
+                oid_obj, val_obj = varBind
+                oid_str = str(oid_obj)
+                val_str = val_obj.prettyPrint()
+
+                # いずれかの OID がまだインターフェース関連の MIB の範囲内であれば続行
+                if oid_str.startswith('1.3.6.1.2.1.2.2.1') or oid_str.startswith('1.3.6.1.2.1.31.1.1.1'):
+                    out_of_bounds = False
+
+                # 該当する各項目へマッピング（インデックスごとに整理）
+                if oid_str.startswith(oid_index):
+                    idx = oid_str.replace(oid_index + '.', '')
+                    interface_data.setdefault(idx, {})['index'] = val_str
+                elif oid_str.startswith(oid_descr):
+                    idx = oid_str.replace(oid_descr + '.', '')
+                    interface_data.setdefault(idx, {})['descr'] = val_str
+                elif oid_str.startswith(oid_status):
+                    idx = oid_str.replace(oid_status + '.', '')
+                    interface_data.setdefault(idx, {})['status'] = val_str
+                elif oid_str.startswith(oid_in):
+                    idx = oid_str.replace(oid_in + '.', '')
+                    interface_data.setdefault(idx, {})['in'] = val_str
+                elif oid_str.startswith(oid_out):
+                    idx = oid_str.replace(oid_out + '.', '')
+                    interface_data.setdefault(idx, {})['out'] = val_str
+                elif oid_str.startswith(oid_speed):
+                    idx = oid_str.replace(oid_speed + '.', '')
+                    interface_data.setdefault(idx, {})['speed'] = val_str
+                elif oid_str.startswith(oid_alias):
+                    idx = oid_str.replace(oid_alias + '.', '')
+                    interface_data.setdefault(idx, {})['alias'] = val_str
+
+            # すべてのデータが範囲外になったら終了
+            if out_of_bounds:
+                break
+    """
+
+    """
+    for idx, metrics in sorted(interface_data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else x[0]):
+
+        print(f"--- Interface Index: {idx} ---")
+        print(f"  Name (ifDescr)      : {metrics.get('descr', 'N/A')}")
+        print(f"  Status (ifAdmin)    : {metrics.get('status', 'N/A')}")
+        print(f"  In Octets (64bit)   : {metrics.get('in', 'N/A')}")
+        print(f"  Out Octets (64bit)  : {metrics.get('out', 'N/A')}")
+    """
+
+    return interface_data
+
+
+def getTEST(IP, SNMPC):
+    # 1. SNMPエンジンの初期化
+    snmp_engine = SnmpEngine()
+
+    # 2. 認証情報の設定 (例: コミュニティ名 'public', SNMP v2c)
+    auth_data = CommunityData(SNMPC, mpModel=1)
+
+    # 3. 宛先ターゲットの設定 (IPアドレス、ポート番号)
+    transport_target =  UdpTransportTarget((IP, 161))
+
+    # 4. 取得したい開始 OID (例: インターフェースの解説文字列 ifDescr)
+    start_oid = ObjectType(ObjectIdentity('1.3.1.6.1.2.1.2.2.1.2'))
+
+    # 5. bulk_cmd の実行
+    # 引数: エンジン, 認証, ターゲット, ContextData, nonRepeaters, maxRepetitions, OID
+    for (errorIndication, errorStatus, errorIndex, varBinds) in bulk_cmd(
+        snmp_engine,
+        auth_data,
+        transport_target,
+        ContextData(),
+        0,   # nonRepeaters: 繰り返し不要なOIDの数
+        20,  # maxRepetitions: 1リクエストあたりにまとめて取得する最大数
+        start_oid
+    ):
+        # エラーハンドリング
+        if errorIndication:
+            print(f"Error: {errorIndication}")
+            break
+        elif errorStatus:
+            print(f"Error Status: {errorStatus.prettyPrint()} at {errorIndex}")
+            break
+        else:
+            # 取得した変数のバインディングを展開
+            for varBind in varBinds:
+                print(' = '.join([x.prettyPrint() for x in varBind]))
+
+def mkinfo(info_data, savedir_path):
+    os.makedirs(savedir_path, exist_ok=True)
+    json_str = json.dumps(info_data, ensure_ascii=False)
+    with open(savedir_path + "/info.json","w") as o:
+        print(json_str, file=o)
+
+def mkdata(input_file_path, savedir_path):
+    os.makedirs(savedir_path, exist_ok=True)
+
+    PRG3 = """
+    BEGIN { 
+        FS=\",\"
+    } 
+    {
+       gsub( "/", "-", $3 )
+       gsub( " ", "_", $3 )
+       OFS=","
+       print $0 >> out"/"$3".csv"
+    
+    
+     }"""
+    awk_command = ["awk",  "-v", f"out={savedir_path}", PRG3, input_file_path]
+    
+    process = subprocess.Popen(
+        awk_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        #text=True
+        universal_newlines=True
+    )
+
+
+def job():
+    #savepath = './tmpdata'
+    savepath = '/sclog/tmp/_snmp/tmpdata'
+    datapath = '/sclog/tmp/_snmp/data'
+
+
+    #dt_now = datetime.datetime.now().strftime('%Y/%m/%d,%H:%M:%S')
+    #dt_now = datetime.datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y/%m/%d,%H:%M:%S')
+    dt_now = datetime.datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')
+
+
+    print(dt_now)
+
+    yyyymmdd = dt_now.split(" ")[0]
+    hhmmss = dt_now.split(" ")[1].replace(':','-')
+
+    ymd = yyyymmdd.split("-")
+    yyyymm = ymd[0]  + ymd[1]
+    dd     = ymd[2] 
+
+    node_list = {}
+    snmpc_list = {}
+    
+    with open("node_list.csv", mode="r", encoding="utf-8") as file:
+        reader = csv.reader(file)
+        for row in reader:
+            # 行が空でないか確認
+            if row:
+                key = row[0]  
+                value = row[1]  
+                snmpc = row[2]  
+                node_list[key] = value
+                snmpc_list[key] = snmpc
+    
+    print(node_list)
+    print(snmpc_list)
+
+    for hostname in node_list.keys():
+        if hostname.startswith('#'):
+                continue
+
+        ifNumber = get(node_list[hostname], snmpc_list[hostname], 'ifNumber', 0)
+        print(hostname, "ifNumber:", ifNumber)
+
+        data = getALLDATA(node_list[hostname], snmpc_list[hostname])
+        #data = getTEST(node_list[hostname])
+        file_path = Path(savepath + '/' + yyyymm + '/' + dd + '/' + hhmmss+ '_' + hostname + '.txt')
+        out_dir = datapath + '/' + yyyymm + '/' + dd + '/' + hostname 
+        info_dict = {}
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with file_path.open("a", encoding="utf-8") as f:
+            for idx, metrics in sorted(data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else x[0]):
+
+                print(f"--- {hostname} Interface Index: {idx} / {ifNumber} ---")
+                print(f"  Index               : {metrics.get('index', 'N/A')}")
+                print(f"  Name                : {metrics.get('descr', 'N/A')}")
+                print(f"  Alias               : {metrics.get('alias', 'N/A')}")
+                print(f"  Status              : {metrics.get('status', 'N/A')}")
+                print(f"  Speed               : {metrics.get('speed', 'N/A')}")
+                print(f"  In Octets (64bit)   : {metrics.get('in', 'N/A')}")
+                print(f"  Out Octets (64bit)  : {metrics.get('out', 'N/A')}")
+
+                _index   = metrics.get('index', 'N/A')
+                _descr   = metrics.get('descr', 'N/A')
+                _alias   = metrics.get('alias', 'N/A')
+                _status  = metrics.get('status','N/A')
+                _in      = metrics.get('in',    'N/A')
+                _out     = metrics.get('out',   'N/A')
+                _speed   = metrics.get('speed',   'N/A')
+
+                name =_descr.replace(" ", "_").replace("/","-")
+                info_dict[name] = {
+                                    "desc"  : _alias,
+                                    "speed" : _speed,
+                                    "etc"   : "ABC",
+                                  }
+                st = f"{dt_now}\
+,{_index}\
+,{_descr}\
+,{_status}\
+,{_in}\
+,{_out}\
+,"
+                print(st)
+                if _status == '2':
+                       continue
+
+                if _in == 'N/A' and _out == 'N/A':
+                       continue
+
+                f.write(st + '\n')
+
+        mkdata(file_path, out_dir)
+        mkinfo(info_dict, out_dir)
+
+
+
+
+def run():
+    
+    #dt_now = datetime.datetime.now().strftime('%Y/%m/%d,%H:%M:%S')
+    dt_now = datetime.datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y/%m/%d,%H:%M:%S')
+    print(dt_now)
+    
+    
+    
+    # 1分毎に実行
+    #schedule.every().minute.at(":00").do(job)
+    # 5分ごとに my_job を実行するように登録
+    
+    schedule.every(5).minutes.do(job)
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+    
+    #job()
+
+
+def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True, help="config file path")
+    parser.add_argument('--nodelist', required=True, help="target node list csv")
+    #parser.add_argument('--exec',  action="store_true", help="real exec")
+    args = parser.parse_args()
+
+    """
+    if topdir == ',' or  topdir == './' or topdir == '/':
+          print("topdir error!", topdir)
+          sys.exit()
+
+    if os.path.isdir(topdir):
+          print("topdir exist!!", topdir)
+          sys.exit()
+    """
+    if os.path.isfile(args.config):
+          print("config not exist!!", args.config)
+          sys.exit()
+    if os.path.isfile(args.nodelist):
+          print("nodelist not exist!!", args.nodelist)
+          sys.exit()
+
+    if not args.exec:
+       print("-----------")
+       sys.exit()
+
+    sys.exit()
+
+
+
+
+if __name__ == "__main__":
+    main()
+
